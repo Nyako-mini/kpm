@@ -8,45 +8,90 @@
 #define PAGE_SIZE         0x1000
 #define INSN_SIZE         4
 
-// 从之前成功运行的日志中提取的实际符号偏移
-// 这些是从同一个内核镜像中通过kallsyms找到的真实值
-#define TCP_INIT_SOCK_OFFSET     0x0154ac80
-#define MEMBLOCK_RESERVE_OFFSET  0x00550690
-#define MEMBLOCK_FREE_OFFSET     0x005503a0
-#define MEMBLOCK_MARK_NOMAP_OFFSET 0x005511c0
-#define MEMBLOCK_ALLOC_OFFSET    0x00550690
-#define PANIC_OFFSET             0x00352370
-#define REST_INIT_OFFSET         0x00352370
-#define KERNEL_INIT_OFFSET       0x00352370
-#define COPY_PROCESS_OFFSET      0x00352370
-#define AVC_DENIED_OFFSET        0x00352370
-#define SLOW_AVC_AUDIT_OFFSET    0x00352370
-#define INPUT_HANDLE_EVENT_OFFSET 0x00352370
-#define CGROUP_INIT_OFFSET       0x00352370
-#define CGROUP_POST_FORK_OFFSET  0x00352370
-
-// 需要从kallsyms中提取的准确偏移列表
+// 缓存从kallsyms找到的符号
 static struct {
     const char *name;
     uint32_t offset;
     int found;
-} required_symbols[] = {
+} cached_symbols[] = {
     {"tcp_init_sock", 0, 0},
     {"memblock_reserve", 0, 0},
     {"memblock_free", 0, 0},
     {"memblock_mark_nomap", 0, 0},
     {"memblock_alloc_try_nid", 0, 0},
+    {"memblock_alloc", 0, 0},
     {"panic", 0, 0},
     {"rest_init", 0, 0},
     {"kernel_init", 0, 0},
     {"copy_process", 0, 0},
+    {"cgroup_post_fork", 0, 0},
     {"avc_denied", 0, 0},
     {"slow_avc_audit", 0, 0},
     {"input_handle_event", 0, 0},
     {"cgroup_init", 0, 0},
-    {"cgroup_post_fork", 0, 0},
     {NULL, 0, 0}
 };
+
+static jmp_buf segv_env;
+static struct sigaction old_sa;
+static int in_segv_handler = 0;
+
+static void segv_handler(int signum, siginfo_t *info, void *context) {
+    (void)signum;
+    (void)context;
+    
+    if (!in_segv_handler) {
+        in_segv_handler = 1;
+        tools_loge("Segmentation fault caught at address: %p\n", info->si_addr);
+        in_segv_handler = 0;
+        longjmp(segv_env, 1);
+    }
+}
+
+static void setup_segv_handler(void) {
+    struct sigaction sa;
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &old_sa);
+}
+
+static void restore_segv_handler(void) {
+    sigaction(SIGSEGV, &old_sa, NULL);
+}
+
+// 尝试查找带后缀的符号
+static int32_t find_suffixed_symbol_internal(kallsym_t *kallsym, char *img_buf, const char *symbol) {
+    char suffixed_name[128];
+    
+    // 查找带 .isra 后缀的版本
+    snprintf(suffixed_name, sizeof(suffixed_name), "%s.isra", symbol);
+    int32_t offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
+    if (offset > 0) {
+        tools_logi("Found %s at offset 0x%x\n", suffixed_name, offset);
+        return offset;
+    }
+    
+    // 查找带 .constprop 后缀的版本
+    snprintf(suffixed_name, sizeof(suffixed_name), "%s.constprop", symbol);
+    offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
+    if (offset > 0) {
+        tools_logi("Found %s at offset 0x%x\n", suffixed_name, offset);
+        return offset;
+    }
+    
+    // 查找带数字后缀的版本
+    for (int j = 0; j < 10; j++) {
+        snprintf(suffixed_name, sizeof(suffixed_name), "%s.%d", symbol, j);
+        offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
+        if (offset > 0) {
+            tools_logi("Found %s at offset 0x%x\n", suffixed_name, offset);
+            return offset;
+        }
+    }
+    
+    return 0;
+}
 
 // 从内核的kallsyms中提取所有需要的符号
 static int extract_symbols_from_kallsyms(kallsym_t *kallsym, char *img_buf) {
@@ -54,90 +99,60 @@ static int extract_symbols_from_kallsyms(kallsym_t *kallsym, char *img_buf) {
     
     tools_logi("Extracting symbols from kallsyms...\n");
     
-    for (int i = 0; required_symbols[i].name != NULL; i++) {
-        // 去除const限定符，因为get_symbol_offset需要char*
-        char *sym_name = (char *)required_symbols[i].name;
+    for (int i = 0; cached_symbols[i].name != NULL; i++) {
+        const char *sym_name = cached_symbols[i].name;
         
         // 先尝试直接查找
         int32_t offset = get_symbol_offset(kallsym, img_buf, sym_name);
         
         // 如果没找到，尝试查找带后缀的版本
         if (offset <= 0) {
-            char suffixed_name[128];
-            // 查找带 .isra 后缀的版本
-            snprintf(suffixed_name, sizeof(suffixed_name), "%s.isra", sym_name);
-            offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
-            
-            if (offset <= 0) {
-                // 查找带 .constprop 后缀的版本
-                snprintf(suffixed_name, sizeof(suffixed_name), "%s.constprop", sym_name);
-                offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
-            }
-            
-            if (offset <= 0) {
-                // 查找带数字后缀的版本
-                for (int j = 0; j < 10; j++) {
-                    snprintf(suffixed_name, sizeof(suffixed_name), "%s.%d", sym_name, j);
-                    offset = get_symbol_offset(kallsym, img_buf, suffixed_name);
-                    if (offset > 0) break;
-                }
-            }
+            offset = find_suffixed_symbol_internal(kallsym, img_buf, sym_name);
         }
         
         if (offset > 0) {
-            required_symbols[i].offset = offset;
-            required_symbols[i].found = 1;
-            tools_logi("Found %s at offset 0x%x\n", required_symbols[i].name, offset);
+            cached_symbols[i].offset = offset;
+            cached_symbols[i].found = 1;
+            tools_logi("Cached %s at offset 0x%x\n", sym_name, offset);
         } else {
-            tools_loge("Warning: Could not find symbol %s\n", required_symbols[i].name);
+            tools_loge("Warning: Could not find symbol %s\n", sym_name);
         }
     }
     
     return 0;
 }
 
-// 获取符号偏移，优先使用kallsyms找到的值，如果没有则使用默认值
+// 获取符号偏移，只使用kallsyms找到的值
 int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
 {
     if (!info || !img || !symbol) return 0;
     
-    // 先尝试从kallsyms获取
+    // 先尝试从kallsyms实时获取
     int32_t offset = get_symbol_offset(info, img, symbol);
     if (offset > 0) {
         tools_logi("Found %s via kallsyms at 0x%x\n", symbol, offset);
         return offset;
     }
     
-    // 如果kallsyms没找到，检查是否在我们提取的列表中
-    for (int i = 0; required_symbols[i].name != NULL; i++) {
-        if (strcmp(required_symbols[i].name, symbol) == 0) {
-            if (required_symbols[i].found) {
-                tools_logi("Using cached offset for %s: 0x%x\n", symbol, required_symbols[i].offset);
-                return required_symbols[i].offset;
+    // 尝试查找带后缀的版本
+    offset = find_suffixed_symbol_internal(info, img, symbol);
+    if (offset > 0) {
+        return offset;
+    }
+    
+    // 检查是否在我们缓存的列表中
+    for (int i = 0; cached_symbols[i].name != NULL; i++) {
+        if (strcmp(cached_symbols[i].name, symbol) == 0) {
+            if (cached_symbols[i].found) {
+                tools_logi("Using cached offset for %s: 0x%x\n", symbol, cached_symbols[i].offset);
+                return cached_symbols[i].offset;
             }
             break;
         }
     }
     
-    // 最后尝试使用默认值
-    tools_loge("Warning: Using default offset for %s\n", symbol);
-    
-    if (strcmp(symbol, "tcp_init_sock") == 0) return TCP_INIT_SOCK_OFFSET;
-    if (strcmp(symbol, "memblock_reserve") == 0) return MEMBLOCK_RESERVE_OFFSET;
-    if (strcmp(symbol, "memblock_free") == 0) return MEMBLOCK_FREE_OFFSET;
-    if (strcmp(symbol, "memblock_mark_nomap") == 0) return MEMBLOCK_MARK_NOMAP_OFFSET;
-    if (strcmp(symbol, "memblock_alloc_try_nid") == 0) return MEMBLOCK_ALLOC_OFFSET;
-    if (strcmp(symbol, "memblock_alloc") == 0) return MEMBLOCK_ALLOC_OFFSET;
-    if (strcmp(symbol, "panic") == 0) return PANIC_OFFSET;
-    if (strcmp(symbol, "rest_init") == 0) return REST_INIT_OFFSET;
-    if (strcmp(symbol, "kernel_init") == 0) return KERNEL_INIT_OFFSET;
-    if (strcmp(symbol, "copy_process") == 0) return COPY_PROCESS_OFFSET;
-    if (strcmp(symbol, "avc_denied") == 0) return AVC_DENIED_OFFSET;
-    if (strcmp(symbol, "slow_avc_audit") == 0) return SLOW_AVC_AUDIT_OFFSET;
-    if (strcmp(symbol, "input_handle_event") == 0) return INPUT_HANDLE_EVENT_OFFSET;
-    if (strcmp(symbol, "cgroup_init") == 0) return CGROUP_INIT_OFFSET;
-    if (strcmp(symbol, "cgroup_post_fork") == 0) return CGROUP_POST_FORK_OFFSET;
-    
+    // 特别处理：如果找不到，返回0，让调用者处理
+    tools_loge("Warning: Could not find symbol %s\n", symbol);
     return 0;
 }
 
@@ -145,6 +160,12 @@ int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol)
 {
     if (!info || !img || !symbol) {
         tools_loge_exit("invalid parameters for symbol %s\n", symbol ? symbol : "null");
+    }
+    
+    // 如果是kallsyms_lookup_name，直接返回错误，因为我们不需要它
+    if (strcmp(symbol, "kallsyms_lookup_name") == 0) {
+        tools_loge("Error: kallsyms_lookup_name should not be required\n");
+        return -1;
     }
     
     int32_t offset = get_symbol_offset_zero(info, img, symbol);
@@ -187,34 +208,44 @@ int fillin_map_symbol(kallsym_t *kallsym, char *img_buf, map_symbol_t *symbol, i
     
     tools_logi("=== fillin_map_symbol start ===\n");
     
-    // 清零结构体
-    memset(symbol, 0, sizeof(map_symbol_t));
+    // 设置段错误处理
+    setup_segv_handler();
     
-    symbol->memblock_reserve_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_reserve");
-    symbol->memblock_free_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_free");
-    symbol->memblock_mark_nomap_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_mark_nomap");
-    
-    // 尝试多种可能的 memblock alloc 函数
-    symbol->memblock_phys_alloc_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc_try_nid");
-    if (!symbol->memblock_phys_alloc_relo) {
-        symbol->memblock_phys_alloc_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc");
-    }
-    symbol->memblock_virt_alloc_relo = symbol->memblock_phys_alloc_relo;
-    
-    if (!symbol->memblock_phys_alloc_relo) {
-        tools_loge_exit("no memblock alloc function found");
-    }
-    
-    tools_logi("memblock_reserve: 0x%" PRIx64 "\n", symbol->memblock_reserve_relo);
-    tools_logi("memblock_free: 0x%" PRIx64 "\n", symbol->memblock_free_relo);
-    tools_logi("memblock_alloc: 0x%" PRIx64 "\n", symbol->memblock_phys_alloc_relo);
-    
-    if ((is_be() ^ target_is_be)) {
-        for (int64_t *pos = (int64_t *)symbol; pos < (int64_t *)(symbol + 1); pos++) {
-            *pos = i64swp(*pos);
+    if (setjmp(segv_env) == 0) {
+        // 清零结构体
+        memset(symbol, 0, sizeof(map_symbol_t));
+        
+        symbol->memblock_reserve_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_reserve");
+        symbol->memblock_free_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_free");
+        symbol->memblock_mark_nomap_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_mark_nomap");
+        
+        // 尝试多种可能的 memblock alloc 函数
+        symbol->memblock_phys_alloc_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc_try_nid");
+        if (!symbol->memblock_phys_alloc_relo) {
+            symbol->memblock_phys_alloc_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc");
         }
+        symbol->memblock_virt_alloc_relo = symbol->memblock_phys_alloc_relo;
+        
+        if (!symbol->memblock_phys_alloc_relo) {
+            tools_loge_exit("no memblock alloc function found");
+        }
+        
+        tools_logi("memblock_reserve: 0x%" PRIx64 "\n", symbol->memblock_reserve_relo);
+        tools_logi("memblock_free: 0x%" PRIx64 "\n", symbol->memblock_free_relo);
+        tools_logi("memblock_alloc: 0x%" PRIx64 "\n", symbol->memblock_phys_alloc_relo);
+        
+        if ((is_be() ^ target_is_be)) {
+            for (int64_t *pos = (int64_t *)symbol; pos < (int64_t *)(symbol + 1); pos++) {
+                *pos = i64swp(*pos);
+            }
+        }
+    } else {
+        tools_loge("segfault in fillin_map_symbol\n");
+        restore_segv_handler();
+        return -1;
     }
     
+    restore_segv_handler();
     tools_logi("=== fillin_map_symbol end ===\n");
     return 0;
 }
@@ -229,51 +260,67 @@ int fillin_patch_config(kallsym_t *kallsym, char *img_buf, int imglen, patch_con
     
     tools_logi("=== fillin_patch_config start ===\n");
     
-    // 清零结构体
-    memset(symbol, 0, sizeof(patch_config_t));
+    // 设置段错误处理
+    setup_segv_handler();
     
-    symbol->panic = get_symbol_offset_zero(kallsym, img_buf, "panic");
-    symbol->rest_init = get_symbol_offset_zero(kallsym, img_buf, "rest_init");
-    
-    if (!symbol->rest_init) {
-        symbol->cgroup_init = get_symbol_offset_zero(kallsym, img_buf, "cgroup_init");
-    }
-    
-    if (!symbol->rest_init && !symbol->cgroup_init) {
-        tools_loge("warning: no rest_init/cgroup_init found\n");
-    }
-    
-    symbol->kernel_init = get_symbol_offset_zero(kallsym, img_buf, "kernel_init");
-    symbol->copy_process = get_symbol_offset_zero(kallsym, img_buf, "copy_process");
-    
-    if (!symbol->copy_process) {
-        symbol->cgroup_post_fork = get_symbol_offset_zero(kallsym, img_buf, "cgroup_post_fork");
-    }
-    
-    if (is_android) {
-        symbol->avc_denied = get_symbol_offset_zero(kallsym, img_buf, "avc_denied");
-        if (!symbol->avc_denied) {
-            tools_loge_exit("no avc_denied found for Android kernel\n");
+    if (setjmp(segv_env) == 0) {
+        // 清零结构体
+        memset(symbol, 0, sizeof(patch_config_t));
+        
+        symbol->panic = get_symbol_offset_zero(kallsym, img_buf, "panic");
+        symbol->rest_init = get_symbol_offset_zero(kallsym, img_buf, "rest_init");
+        
+        if (!symbol->rest_init) {
+            symbol->cgroup_init = get_symbol_offset_zero(kallsym, img_buf, "cgroup_init");
         }
-    }
-    
-    symbol->slow_avc_audit = get_symbol_offset_zero(kallsym, img_buf, "slow_avc_audit");
-    symbol->input_handle_event = get_symbol_offset_zero(kallsym, img_buf, "input_handle_event");
-    
-    // 打印找到的符号
-    tools_logi("panic: 0x%" PRIx64 "\n", symbol->panic);
-    tools_logi("rest_init: 0x%" PRIx64 "\n", symbol->rest_init);
-    tools_logi("kernel_init: 0x%" PRIx64 "\n", symbol->kernel_init);
-    tools_logi("copy_process: 0x%" PRIx64 "\n", symbol->copy_process);
-    tools_logi("avc_denied: 0x%" PRIx64 "\n", symbol->avc_denied);
-    tools_logi("input_handle_event: 0x%" PRIx64 "\n", symbol->input_handle_event);
-    
-    if ((is_be() ^ target_is_be)) {
-        for (int64_t *pos = (int64_t *)symbol; pos < (int64_t *)(symbol + 1); pos++) {
-            *pos = i64swp(*pos);
+        
+        if (!symbol->rest_init && !symbol->cgroup_init) {
+            tools_loge("warning: no rest_init/cgroup_init found\n");
         }
+        
+        symbol->kernel_init = get_symbol_offset_zero(kallsym, img_buf, "kernel_init");
+        
+        // copy_process可能找不到，尝试使用cgroup_post_fork作为替代
+        symbol->copy_process = get_symbol_offset_zero(kallsym, img_buf, "copy_process");
+        if (!symbol->copy_process) {
+            symbol->cgroup_post_fork = get_symbol_offset_zero(kallsym, img_buf, "cgroup_post_fork");
+            if (symbol->cgroup_post_fork) {
+                tools_logi("Using cgroup_post_fork (0x%" PRIx64 ") as fallback for copy_process\n", 
+                          symbol->cgroup_post_fork);
+            }
+        }
+        
+        if (is_android) {
+            symbol->avc_denied = get_symbol_offset_zero(kallsym, img_buf, "avc_denied");
+            if (!symbol->avc_denied) {
+                tools_loge_exit("no avc_denied found for Android kernel\n");
+            }
+        }
+        
+        symbol->slow_avc_audit = get_symbol_offset_zero(kallsym, img_buf, "slow_avc_audit");
+        symbol->input_handle_event = get_symbol_offset_zero(kallsym, img_buf, "input_handle_event");
+        
+        // 打印找到的符号
+        tools_logi("panic: 0x%" PRIx64 "\n", symbol->panic);
+        tools_logi("rest_init: 0x%" PRIx64 "\n", symbol->rest_init);
+        tools_logi("kernel_init: 0x%" PRIx64 "\n", symbol->kernel_init);
+        tools_logi("copy_process: 0x%" PRIx64 "\n", symbol->copy_process);
+        tools_logi("cgroup_post_fork: 0x%" PRIx64 "\n", symbol->cgroup_post_fork);
+        tools_logi("avc_denied: 0x%" PRIx64 "\n", symbol->avc_denied);
+        tools_logi("input_handle_event: 0x%" PRIx64 "\n", symbol->input_handle_event);
+        
+        if ((is_be() ^ target_is_be)) {
+            for (int64_t *pos = (int64_t *)symbol; pos < (int64_t *)(symbol + 1); pos++) {
+                *pos = i64swp(*pos);
+            }
+        }
+    } else {
+        tools_loge("segfault in fillin_patch_config\n");
+        restore_segv_handler();
+        return -1;
     }
     
+    restore_segv_handler();
     tools_logi("=== fillin_patch_config end ===\n");
     return 0;
 }
@@ -281,8 +328,5 @@ int fillin_patch_config(kallsym_t *kallsym, char *img_buf, int imglen, patch_con
 // 保留但不再使用
 int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symbol)
 {
-    (void)kallsym;
-    (void)img_buf;
-    (void)symbol;
     return 0;
 }
