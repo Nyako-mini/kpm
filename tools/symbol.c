@@ -58,6 +58,8 @@ static uint32_t cfi_failure_pattern[] = {0xd5384100, 0xb4000100, 0xf94013e0};
 static int cfi_failure_len = 3;
 
 static uint32_t *get_pattern(const char *symbol, int *len) {
+    if (!symbol) return NULL;
+    
     if (!strcmp(symbol, "panic")) { *len = panic_len; return panic_pattern; }
     if (!strcmp(symbol, "memblock_reserve")) { *len = memblock_reserve_len; return memblock_reserve_pattern; }
     if (!strcmp(symbol, "memblock_free")) { *len = memblock_free_len; return memblock_free_pattern; }
@@ -75,6 +77,8 @@ static uint32_t *get_pattern(const char *symbol, int *len) {
 }
 
 static uint64_t scan_pattern_in_range(uint32_t *start, uint32_t *end, uint32_t *pattern, int pattern_len) {
+    if (!start || !end || !pattern || pattern_len <= 0) return 0;
+    
     uint32_t *p = start;
     
     while (p < end - pattern_len) {
@@ -88,12 +92,14 @@ static uint64_t scan_pattern_in_range(uint32_t *start, uint32_t *end, uint32_t *
         if (match) {
             return (uint64_t)p;
         }
-        p += 4;
+        p++;
     }
     return 0;
 }
 
 static uint64_t find_by_text_reference(uint64_t known_addr, const char *target_sym) {
+    if (!known_addr || !target_sym) return 0;
+    
     uint32_t *code = (uint32_t *)known_addr;
     
     for (int i = 0; i < 0x200; i++) {
@@ -116,6 +122,8 @@ static uint64_t find_by_text_reference(uint64_t known_addr, const char *target_s
 
 static int32_t on_each_symbol_callbackup(int32_t index, char type, const char *symbol, int32_t offset, void *userdata)
 {
+    if (!userdata || !symbol) return 0;
+    
     struct on_each_symbol_struct *data = (struct on_each_symbol_struct *)userdata;
     int len = strlen(data->symbol);
     if (strstr(symbol, data->symbol) == symbol && (symbol[len] == '.' || symbol[len] == '$') &&
@@ -129,47 +137,86 @@ static int32_t on_each_symbol_callbackup(int32_t index, char type, const char *s
 
 int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symbol)
 {
+    if (!kallsym || !img_buf || !symbol) return 0;
+    
     struct on_each_symbol_struct udata = { symbol, 0 };
     on_each_symbol(kallsym, img_buf, &udata, on_each_symbol_callbackup);
     return udata.addr;
 }
 
 static int32_t find_by_pattern(const char *symbol) {
+    if (!symbol) return 0;
+    
     int pattern_len;
     uint32_t *pattern = get_pattern(symbol, &pattern_len);
     if (!pattern) return 0;
     
     uint64_t addr = scan_pattern_in_range((uint32_t *)CODE_START, (uint32_t *)CODE_END, pattern, pattern_len);
+    if (addr) {
+        tools_logi("found %s by pattern at 0x%llx\n", symbol, addr - CODE_START);
+    }
     return addr ? addr - CODE_START : 0;
 }
 
 static int32_t find_memblock_phys_alloc(kallsym_t *kallsym, char *img_buf) {
-    int32_t addr = find_by_pattern("memblock_alloc_try_nid");
-    if (addr) return addr;
+    int32_t addr = 0;
+    
+    addr = get_symbol_offset(kallsym, img_buf, "memblock_phys_alloc");
+    if (addr > 0) {
+        tools_logi("found memblock_phys_alloc at 0x%x\n", addr);
+        return addr;
+    }
+    
+    addr = find_by_pattern("memblock_alloc_try_nid");
+    if (addr) {
+        tools_logi("found memblock_alloc_try_nid by pattern at 0x%x\n", addr);
+        return addr;
+    }
     
     addr = get_symbol_offset(kallsym, img_buf, "memblock_alloc_try_nid");
-    if (addr > 0) return addr;
+    if (addr > 0) {
+        tools_logi("found memblock_alloc_try_nid at 0x%x\n", addr);
+        return addr;
+    }
     
     addr = find_suffixed_symbol(kallsym, img_buf, "memblock_alloc_try_nid");
+    if (addr) {
+        tools_logi("found memblock_alloc_try_nid suffixed at 0x%x\n", addr);
+    }
     return addr;
 }
 
 int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
 {
+    if (!info || !img || !symbol) return 0;
+    
     int32_t offset = get_symbol_offset(info, img, symbol);
-    if (offset > 0) return offset;
+    if (offset > 0) {
+        tools_logi("%s found via kallsyms: 0x%x\n", symbol, offset);
+        return offset;
+    }
     
     offset = find_by_pattern(symbol);
-    if (offset > 0) return offset;
+    if (offset > 0) {
+        tools_logi("%s found via pattern: 0x%x\n", symbol, offset);
+        return offset;
+    }
     
     offset = find_suffixed_symbol(info, img, symbol);
-    return offset > 0 ? offset : 0;
+    if (offset > 0) {
+        tools_logi("%s found via suffixed: 0x%x\n", symbol, offset);
+    }
+    return offset;
 }
 
 int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol)
 {
+    if (!info || !img || !symbol) {
+        tools_loge_exit("invalid parameters for symbol %s\n", symbol ? symbol : "null");
+    }
+    
     int32_t offset = get_symbol_offset_zero(info, img, symbol);
-    if (offset >= 0) {
+    if (offset > 0) {
         return offset;
     } else {
         tools_loge_exit("no symbol %s\n", symbol);
@@ -178,6 +225,8 @@ int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol)
 
 int32_t try_get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
 {
+    if (!info || !img || !symbol) return 0;
+    
     int32_t offset = get_symbol_offset(info, img, symbol);
     if (offset > 0) return offset;
     
@@ -189,43 +238,70 @@ int32_t try_get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
 
 void select_map_area(kallsym_t *kallsym, char *image_buf, int32_t *map_start, int32_t *max_size)
 {
-    int32_t addr = 0x200;
-    addr = get_symbol_offset_exit(kallsym, image_buf, "tcp_init_sock");
+    if (!kallsym || !image_buf || !map_start || !max_size) {
+        tools_loge("invalid parameters for select_map_area\n");
+        return;
+    }
+    
+    int32_t addr = get_symbol_offset_exit(kallsym, image_buf, "tcp_init_sock");
     *map_start = align_ceil(addr, 16);
     *max_size = 0x800;
+    
+    tools_logi("map_start: 0x%x, max_size: 0x%x\n", *map_start, *max_size);
 }
 
 int fillin_map_symbol(kallsym_t *kallsym, char *img_buf, map_symbol_t *symbol, int32_t target_is_be)
 {
+    if (!kallsym || !img_buf || !symbol) {
+        tools_loge("invalid parameters for fillin_map_symbol\n");
+        return -1;
+    }
+    
+    tools_logi("filling map symbols...\n");
+    
     symbol->memblock_reserve_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_reserve");
+    tools_logi("memblock_reserve_relo: 0x%x\n", symbol->memblock_reserve_relo);
+    
     symbol->memblock_free_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_free");
-
+    tools_logi("memblock_free_relo: 0x%x\n", symbol->memblock_free_relo);
+    
     symbol->memblock_mark_nomap_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_mark_nomap");
-
+    tools_logi("memblock_mark_nomap_relo: 0x%x\n", symbol->memblock_mark_nomap_relo);
+    
     symbol->memblock_phys_alloc_relo = find_memblock_phys_alloc(kallsym, img_buf);
-    symbol->memblock_virt_alloc_relo = find_memblock_phys_alloc(kallsym, img_buf);
+    tools_logi("memblock_phys_alloc_relo: 0x%x\n", symbol->memblock_phys_alloc_relo);
+    
+    symbol->memblock_virt_alloc_relo = symbol->memblock_phys_alloc_relo;
+    tools_logi("memblock_virt_alloc_relo: 0x%x\n", symbol->memblock_virt_alloc_relo);
+    
     if (!symbol->memblock_phys_alloc_relo && !symbol->memblock_virt_alloc_relo)
         tools_loge_exit("no symbol memblock_alloc");
-
+    
     uint64_t memblock_alloc_try_nid = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc_try_nid");
-
+    
     if (!symbol->memblock_phys_alloc_relo) symbol->memblock_phys_alloc_relo = memblock_alloc_try_nid;
     if (!symbol->memblock_virt_alloc_relo) symbol->memblock_virt_alloc_relo = memblock_alloc_try_nid;
     if (!symbol->memblock_phys_alloc_relo && !symbol->memblock_virt_alloc_relo)
         tools_loge_exit("no symbol memblock_alloc");
-
+    
     if ((is_be() ^ target_is_be)) {
+        tools_logi("swapping endianness for map symbols\n");
         for (int64_t *pos = (int64_t *)symbol; pos <= (int64_t *)symbol; pos++) {
             *pos = i64swp(*pos);
         }
     }
+    
+    tools_logi("map symbols filled successfully\n");
     return 0;
 }
 
 static int get_cand_arr_symbol_offset_zero(kallsym_t *kallsym, char *img_buf, char **cand_arr, int cand_num)
 {
+    if (!kallsym || !img_buf || !cand_arr || cand_num <= 0) return 0;
+    
     int offset = 0;
     for (int i = 0; i < cand_num; i++) {
+        if (!cand_arr[i]) continue;
         offset = get_symbol_offset_zero(kallsym, img_buf, cand_arr[i]);
         if (offset) break;
     }
@@ -235,33 +311,67 @@ static int get_cand_arr_symbol_offset_zero(kallsym_t *kallsym, char *img_buf, ch
 int fillin_patch_config(kallsym_t *kallsym, char *img_buf, int imglen, patch_config_t *symbol, int32_t target_is_be,
                         bool is_android)
 {
+    if (!kallsym || !img_buf || !symbol) {
+        tools_loge("invalid parameters for fillin_patch_config\n");
+        return -1;
+    }
+    
+    tools_logi("filling patch config symbols...\n");
+    
     symbol->panic = get_symbol_offset_zero(kallsym, img_buf, "panic");
-
+    tools_logi("panic: 0x%x\n", symbol->panic);
+    
     symbol->rest_init = try_get_symbol_offset_zero(kallsym, img_buf, "rest_init");
-    if (!symbol->rest_init) symbol->cgroup_init = try_get_symbol_offset_zero(kallsym, img_buf, "cgroup_init");
-    if (!symbol->rest_init && !symbol->cgroup_init) tools_loge_exit("no symbol rest_init");
-
+    tools_logi("rest_init: 0x%x\n", symbol->rest_init);
+    
+    if (!symbol->rest_init) {
+        symbol->cgroup_init = try_get_symbol_offset_zero(kallsym, img_buf, "cgroup_init");
+        tools_logi("cgroup_init: 0x%x\n", symbol->cgroup_init);
+    }
+    
+    if (!symbol->rest_init && !symbol->cgroup_init) 
+        tools_loge_exit("no symbol rest_init");
+    
     symbol->kernel_init = try_get_symbol_offset_zero(kallsym, img_buf, "kernel_init");
-
+    tools_logi("kernel_init: 0x%x\n", symbol->kernel_init);
+    
     symbol->report_cfi_failure = get_symbol_offset_zero(kallsym, img_buf, "report_cfi_failure");
     symbol->__cfi_slowpath_diag = get_symbol_offset_zero(kallsym, img_buf, "__cfi_slowpath_diag");
     symbol->__cfi_slowpath = get_symbol_offset_zero(kallsym, img_buf, "__cfi_slowpath");
-
+    
+    tools_logi("cfi symbols: report=0x%x, diag=0x%x, slow=0x%x\n", 
+               symbol->report_cfi_failure, symbol->__cfi_slowpath_diag, symbol->__cfi_slowpath);
+    
     symbol->copy_process = try_get_symbol_offset_zero(kallsym, img_buf, "copy_process");
-    if (!symbol->copy_process) symbol->cgroup_post_fork = get_symbol_offset_zero(kallsym, img_buf, "cgroup_post_fork");
-    if (!symbol->copy_process && !symbol->cgroup_post_fork) tools_loge_exit("no symbol copy_process");
-
+    tools_logi("copy_process: 0x%x\n", symbol->copy_process);
+    
+    if (!symbol->copy_process) {
+        symbol->cgroup_post_fork = get_symbol_offset_zero(kallsym, img_buf, "cgroup_post_fork");
+        tools_logi("cgroup_post_fork: 0x%x\n", symbol->cgroup_post_fork);
+    }
+    
+    if (!symbol->copy_process && !symbol->cgroup_post_fork) 
+        tools_loge_exit("no symbol copy_process");
+    
     symbol->avc_denied = try_get_symbol_offset_zero(kallsym, img_buf, "avc_denied");
-    if (!symbol->avc_denied && is_android) tools_loge_exit("no symbol avc_denied");
-
+    tools_logi("avc_denied: 0x%x\n", symbol->avc_denied);
+    
+    if (!symbol->avc_denied && is_android) 
+        tools_loge_exit("no symbol avc_denied");
+    
     symbol->slow_avc_audit = try_get_symbol_offset_zero(kallsym, img_buf, "slow_avc_audit");
-
+    tools_logi("slow_avc_audit: 0x%x\n", symbol->slow_avc_audit);
+    
     symbol->input_handle_event = get_symbol_offset_zero(kallsym, img_buf, "input_handle_event");
-
+    tools_logi("input_handle_event: 0x%x\n", symbol->input_handle_event);
+    
     if ((is_be() ^ target_is_be)) {
+        tools_logi("swapping endianness for patch config\n");
         for (int64_t *pos = (int64_t *)symbol; pos <= (int64_t *)symbol; pos++) {
             *pos = i64swp(*pos);
         }
     }
+    
+    tools_logi("patch config symbols filled successfully\n");
     return 0;
 }
