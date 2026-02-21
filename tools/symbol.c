@@ -10,7 +10,6 @@
 struct symbol_pattern {
     const char *name;
     uint32_t *pattern;
-    uint32_t mask;
     int pattern_len;
 };
 
@@ -20,55 +19,42 @@ struct on_each_symbol_struct {
 };
 
 static uint32_t panic_pattern[] = {0xd2800015, 0xd503201f, 0xf9401776};
-static uint32_t panic_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int panic_len = 3;
 
 static uint32_t memblock_reserve_pattern[] = {0xf81f0ffe, 0xf9000bf3, 0xf94013f3};
-static uint32_t memblock_reserve_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int memblock_reserve_len = 3;
 
 static uint32_t memblock_free_pattern[] = {0xaa0003f5, 0xf9000bf3, 0xaa0103f4};
-static uint32_t memblock_free_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int memblock_free_len = 3;
 
 static uint32_t memblock_alloc_try_nid_pattern[] = {0xaa0003f9, 0xaa0203f5, 0xaa0303f6};
-static uint32_t memblock_alloc_try_nid_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int memblock_alloc_try_nid_len = 3;
 
 static uint32_t rest_init_pattern[] = {0xd5384100, 0xb2401bf5, 0xd5033cbf};
-static uint32_t rest_init_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int rest_init_len = 3;
 
 static uint32_t kernel_init_pattern[] = {0xaa0103f3, 0x97fffffe, 0xaa0003f4};
-static uint32_t kernel_init_mask[] = {0xffffffff, 0xff000000, 0xffffffff};
 static int kernel_init_len = 3;
 
 static uint32_t copy_process_pattern[] = {0xd15b42b4, 0xb4000100, 0xf94013e0};
-static uint32_t copy_process_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int copy_process_len = 3;
 
 static uint32_t avc_denied_pattern[] = {0xaa1403e0, 0xf9400b94, 0xb50002b4};
-static uint32_t avc_denied_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int avc_denied_len = 3;
 
 static uint32_t slow_avc_audit_pattern[] = {0xaa1303e0, 0xaa1403e1, 0x94000001};
-static uint32_t slow_avc_audit_mask[] = {0xffffffff, 0xffffffff, 0xff000000};
 static int slow_avc_audit_len = 3;
 
 static uint32_t input_handle_event_pattern[] = {0xaa1503f4, 0xaa1503f5, 0xf0000001};
-static uint32_t input_handle_event_mask[] = {0xffffffff, 0xffffffff, 0xff000000};
 static int input_handle_event_len = 3;
 
 static uint32_t cgroup_init_pattern[] = {0xaa1a03e3, 0x97fffffe, 0xf9402ba0};
-static uint32_t cgroup_init_mask[] = {0xffffffff, 0xff000000, 0xffffffff};
 static int cgroup_init_len = 3;
 
 static uint32_t cgroup_post_fork_pattern[] = {0xaa1503f5, 0x52800035, 0x52800034};
-static uint32_t cgroup_post_fork_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int cgroup_post_fork_len = 3;
 
 static uint32_t cfi_failure_pattern[] = {0xd5384100, 0xb4000100, 0xf94013e0};
-static uint32_t cfi_failure_mask[] = {0xffffffff, 0xffffffff, 0xffffffff};
 static int cfi_failure_len = 3;
 
 static uint32_t *get_pattern(const char *symbol, int *len) {
@@ -128,7 +114,8 @@ static uint64_t find_by_text_reference(uint64_t known_addr, const char *target_s
     return 0;
 }
 
-static int32_t on_each_symbol_callbackup(int32_t index, char type, const char *symbol, int32_t offset, void *userdata) {
+static int32_t on_each_symbol_callbackup(int32_t index, char type, const char *symbol, int32_t offset, void *userdata)
+{
     struct on_each_symbol_struct *data = (struct on_each_symbol_struct *)userdata;
     int len = strlen(data->symbol);
     if (strstr(symbol, data->symbol) == symbol && (symbol[len] == '.' || symbol[len] == '$') &&
@@ -140,7 +127,8 @@ static int32_t on_each_symbol_callbackup(int32_t index, char type, const char *s
     return 0;
 }
 
-static int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symbol) {
+int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symbol)
+{
     struct on_each_symbol_struct udata = { symbol, 0 };
     on_each_symbol(kallsym, img_buf, &udata, on_each_symbol_callbackup);
     return udata.addr;
@@ -166,7 +154,8 @@ static int32_t find_memblock_phys_alloc(kallsym_t *kallsym, char *img_buf) {
     return addr;
 }
 
-int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol) {
+int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
+{
     int32_t offset = get_symbol_offset(info, img, symbol);
     if (offset > 0) return offset;
     
@@ -177,16 +166,18 @@ int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol) {
     return offset > 0 ? offset : 0;
 }
 
-int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol) {
+int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol)
+{
     int32_t offset = get_symbol_offset_zero(info, img, symbol);
-    if (offset > 0) {
+    if (offset >= 0) {
         return offset;
     } else {
         tools_loge_exit("no symbol %s\n", symbol);
     }
 }
 
-int32_t try_get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol) {
+int32_t try_get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
+{
     int32_t offset = get_symbol_offset(info, img, symbol);
     if (offset > 0) return offset;
     
@@ -196,31 +187,33 @@ int32_t try_get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol) {
     return find_suffixed_symbol(info, img, symbol);
 }
 
-void select_map_area(kallsym_t *kallsym, char *image_buf, int32_t *map_start, int32_t *max_size) {
+void select_map_area(kallsym_t *kallsym, char *image_buf, int32_t *map_start, int32_t *max_size)
+{
     int32_t addr = 0x200;
     addr = get_symbol_offset_exit(kallsym, image_buf, "tcp_init_sock");
     *map_start = align_ceil(addr, 16);
     *max_size = 0x800;
 }
 
-int fillin_map_symbol(kallsym_t *kallsym, char *img_buf, map_symbol_t *symbol, int32_t target_is_be) {
+int fillin_map_symbol(kallsym_t *kallsym, char *img_buf, map_symbol_t *symbol, int32_t target_is_be)
+{
     symbol->memblock_reserve_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_reserve");
     symbol->memblock_free_relo = get_symbol_offset_exit(kallsym, img_buf, "memblock_free");
+
     symbol->memblock_mark_nomap_relo = get_symbol_offset_zero(kallsym, img_buf, "memblock_mark_nomap");
-    
+
     symbol->memblock_phys_alloc_relo = find_memblock_phys_alloc(kallsym, img_buf);
     symbol->memblock_virt_alloc_relo = find_memblock_phys_alloc(kallsym, img_buf);
-    
     if (!symbol->memblock_phys_alloc_relo && !symbol->memblock_virt_alloc_relo)
         tools_loge_exit("no symbol memblock_alloc");
-    
+
     uint64_t memblock_alloc_try_nid = get_symbol_offset_zero(kallsym, img_buf, "memblock_alloc_try_nid");
-    
+
     if (!symbol->memblock_phys_alloc_relo) symbol->memblock_phys_alloc_relo = memblock_alloc_try_nid;
     if (!symbol->memblock_virt_alloc_relo) symbol->memblock_virt_alloc_relo = memblock_alloc_try_nid;
     if (!symbol->memblock_phys_alloc_relo && !symbol->memblock_virt_alloc_relo)
         tools_loge_exit("no symbol memblock_alloc");
-    
+
     if ((is_be() ^ target_is_be)) {
         for (int64_t *pos = (int64_t *)symbol; pos <= (int64_t *)symbol; pos++) {
             *pos = i64swp(*pos);
@@ -229,7 +222,8 @@ int fillin_map_symbol(kallsym_t *kallsym, char *img_buf, map_symbol_t *symbol, i
     return 0;
 }
 
-static int get_cand_arr_symbol_offset_zero(kallsym_t *kallsym, char *img_buf, char **cand_arr, int cand_num) {
+static int get_cand_arr_symbol_offset_zero(kallsym_t *kallsym, char *img_buf, char **cand_arr, int cand_num)
+{
     int offset = 0;
     for (int i = 0; i < cand_num; i++) {
         offset = get_symbol_offset_zero(kallsym, img_buf, cand_arr[i]);
@@ -239,29 +233,31 @@ static int get_cand_arr_symbol_offset_zero(kallsym_t *kallsym, char *img_buf, ch
 }
 
 int fillin_patch_config(kallsym_t *kallsym, char *img_buf, int imglen, patch_config_t *symbol, int32_t target_is_be,
-                        bool is_android) {
+                        bool is_android)
+{
     symbol->panic = get_symbol_offset_zero(kallsym, img_buf, "panic");
-    
+
     symbol->rest_init = try_get_symbol_offset_zero(kallsym, img_buf, "rest_init");
     if (!symbol->rest_init) symbol->cgroup_init = try_get_symbol_offset_zero(kallsym, img_buf, "cgroup_init");
     if (!symbol->rest_init && !symbol->cgroup_init) tools_loge_exit("no symbol rest_init");
-    
+
     symbol->kernel_init = try_get_symbol_offset_zero(kallsym, img_buf, "kernel_init");
-    
+
     symbol->report_cfi_failure = get_symbol_offset_zero(kallsym, img_buf, "report_cfi_failure");
     symbol->__cfi_slowpath_diag = get_symbol_offset_zero(kallsym, img_buf, "__cfi_slowpath_diag");
     symbol->__cfi_slowpath = get_symbol_offset_zero(kallsym, img_buf, "__cfi_slowpath");
-    
+
     symbol->copy_process = try_get_symbol_offset_zero(kallsym, img_buf, "copy_process");
     if (!symbol->copy_process) symbol->cgroup_post_fork = get_symbol_offset_zero(kallsym, img_buf, "cgroup_post_fork");
     if (!symbol->copy_process && !symbol->cgroup_post_fork) tools_loge_exit("no symbol copy_process");
-    
+
     symbol->avc_denied = try_get_symbol_offset_zero(kallsym, img_buf, "avc_denied");
     if (!symbol->avc_denied && is_android) tools_loge_exit("no symbol avc_denied");
-    
+
     symbol->slow_avc_audit = try_get_symbol_offset_zero(kallsym, img_buf, "slow_avc_audit");
+
     symbol->input_handle_event = get_symbol_offset_zero(kallsym, img_buf, "input_handle_event");
-    
+
     if ((is_be() ^ target_is_be)) {
         for (int64_t *pos = (int64_t *)symbol; pos <= (int64_t *)symbol; pos++) {
             *pos = i64swp(*pos);
